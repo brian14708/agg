@@ -120,6 +120,19 @@ func TestNRA(t *testing.T) {
 			{4, []float64{0.3, 0.3}},
 			{99, []float64{1, 0}},
 		})
+		ret, err := NRA(data, max, 1)
+		require.NoError(t, err)
+		require.Equal(t, int64(99), ret[0].ID())
+		require.Equal(t, 2*2, data.fieldsScanned)
+	}
+	{
+		data := newFetcher([]datum{
+			{1, []float64{0.3, 0.3}},
+			{2, []float64{0.3, 0.3}},
+			{3, []float64{0.3, 0.3}},
+			{4, []float64{0.3, 0.3}},
+			{99, []float64{1, 0}},
+		})
 		ret, err := NRA(data, sum, 1)
 		require.NoError(t, err)
 		require.Equal(t, int64(99), ret[0].ID())
@@ -154,7 +167,7 @@ func BenchmarkNRA(b *testing.B) {
 	f := newFetcher(data)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		NRA(f, sum, 10)
+		_, _ = NRA(f, sum, 10)
 	}
 	b.ReportMetric(float64(f.fieldsScanned)/(float64(len(data)*len(data[0].t)*b.N)), "scanned")
 }
