@@ -11,3 +11,13 @@ func WithBatchSize(k int) Option {
 		opt.batchSize = k
 	}
 }
+
+func makeOptions(opts []Option) options {
+	opt := options{
+		batchSize: 1,
+	}
+	for _, o := range opts {
+		o(&opt)
+	}
+	return opt
+}

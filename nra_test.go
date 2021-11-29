@@ -123,7 +123,7 @@ func TestNRA(t *testing.T) {
 		ret, err := NRA(data, max, 1)
 		require.NoError(t, err)
 		require.Equal(t, int64(99), ret[0].ID())
-		require.Equal(t, 2*2, data.fieldsScanned)
+		require.Equal(t, 2, data.fieldsScanned)
 	}
 	{
 		data := newFetcher([]datum{

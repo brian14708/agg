@@ -5,166 +5,132 @@ import (
 	"sort"
 )
 
-func NRA(fetcher Fetcher, agg Aggregator, k int, opts ...Option) ([]Datum, error) {
-	opt := options{
-		batchSize: 1,
+type nra struct {
+	opt        options
+	a          *aggregator
+	pool       map[interface{}]*entry
+	poolIgnore map[interface{}]uint8
+	q          *entryQ
+	mergeFn    func(*Datum, Datum)
+}
+
+func (n *nra) nextRound(iter int, batchSize int) error {
+	if batchSize < n.opt.batchSize {
+		batchSize = n.opt.batchSize
 	}
-	for _, o := range opts {
-		o(&opt)
+	results, err := n.a.fetch(batchSize)
+	if err != nil {
+		return err
 	}
 
-	it := fetcher.ScanFields()
-	n := len(it)
-	buf := make([]float64, 4*n)
-	currMinField := buf[:n]
-	minField := buf[n : 2*n]
-	misField := buf[2*n : 3*n]
-	tmpField := buf[3*n : 4*n]
-	for i, v := range it {
-		minField[i], currMinField[i], misField[i] = v.ValueRange()
-	}
+	for _, ret := range results {
+		var r Datum
+		for _, r = range ret {
+			id := r.ID()
 
-	var (
-		pool       = make(map[interface{}]*entry)
-		poolIgnore = make(map[interface{}]int)
-		qq         = newEntryQ(k)
-	)
-
-	fetch := func(it []Iterator, batchSize int) ([][]Datum, error) {
-		hasData := false
-		if batchSize < opt.batchSize {
-			batchSize = opt.batchSize
-		}
-		var results [][]Datum
-		for i, c := range it {
-			if c == nil {
+			if e, ok := n.poolIgnore[id]; ok {
+				if e > 1 {
+					n.poolIgnore[id]--
+				} else {
+					delete(n.poolIgnore, id)
+				}
 				continue
 			}
-			ret, err := c.Next(batchSize)
-			if err == io.EOF {
-				it[i] = nil
-				currMinField[i] = minField[i]
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			hasData = true
-			results = append(results, ret)
-		}
-		if !hasData {
-			return nil, io.EOF
-		}
-		return results, nil
-	}
 
-	nextRound := func(iter int, batchSize int) error {
-		if batchSize < opt.batchSize {
-			batchSize = opt.batchSize
+			curr, ok := n.pool[id]
+			if !ok {
+				curr = &entry{
+					unseenIterator: n.a.lenIt(),
+				}
+				n.pool[id] = curr
+			}
+			n.mergeFn(&curr.Datum, r)
+			curr.iter = iter
+			curr.unseenIterator--
 		}
-		results, err := fetch(it, batchSize)
+	}
+	return nil
+}
+
+func (n *nra) fetchAtLeastK(k int) error {
+	for len(n.pool) <= k {
+		err := n.nextRound(0, k-len(n.pool))
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
 
-		for i, ret := range results {
-			var r Datum
-			for _, r = range ret {
-				id := r.ID()
+func (n *nra) updatePool(iter int) {
+	for k, v := range n.pool {
+		var (
+			attrs  = v.Datum.Fields()
+			ignore = (v.unseenIterator == 0)
+			final  bool
+		)
 
-				if e, ok := poolIgnore[id]; ok {
-					if e+1 == n {
-						delete(poolIgnore, id)
-					} else {
-						poolIgnore[id]++
-					}
-					continue
-				}
+		v.best, final = n.a.bestScore(attrs)
 
-				curr, ok := pool[id]
-				if !ok {
-					curr = new(entry)
-					pool[id] = curr
-				}
-				fetcher.Merge(&curr.Datum, r)
-				curr.iter = iter
-				curr.source++
+		if final {
+			v.worst = v.best
+			ignore = true
+		} else if v.iter == iter {
+			v.worst = n.a.worstScore(attrs)
+			if v.worst == v.best {
+				ignore = true
 			}
-			currMinField[i] = r.Fields()[i]
 		}
-		return nil
+		if n.q.update(v) {
+			ignore = true
+		}
+		if ignore {
+			delete(n.pool, k)
+			if v.unseenIterator != 0 {
+				n.poolIgnore[k] = v.unseenIterator
+			}
+		}
+	}
+}
+
+func NRA(fetcher Fetcher, agg Aggregator, k int, opts ...Option) ([]Datum, error) {
+	n := nra{
+		opt:        makeOptions(opts),
+		a:          newAggregator(fetcher.ScanFields(), agg),
+		pool:       make(map[interface{}]*entry),
+		poolIgnore: make(map[interface{}]uint8),
+		q:          newEntryQ(k),
+		mergeFn:    fetcher.Merge,
 	}
 
-	for len(pool) <= k {
-		err := nextRound(0, k-len(pool))
-		if err == io.EOF {
-			cand := make([]Datum, 0, len(pool))
-			score := make([]float64, 0, len(pool))
-			for _, o := range pool {
-				cand = append(cand, o.Datum)
-				score = append(score, agg(o.Datum.Fields()))
-			}
-			sort.Sort(&sortByScore{cand, score})
-			return cand, nil
-		} else if err != nil {
-			return nil, err
+	// get at least k objects
+	if err := n.fetchAtLeastK(k); err == io.EOF {
+		cand := make([]Datum, 0, len(n.pool))
+		score := make([]float64, 0, len(n.pool))
+		for _, o := range n.pool {
+			cand = append(cand, o.Datum)
+			score = append(score, n.a.worstScore(o.Fields()))
 		}
+		sort.Sort(&sortByScore{cand, score})
+		return cand, nil
+	} else if err != nil {
+		return nil, err
 	}
 
 	for iter := 0; ; iter++ {
-		if err := nextRound(iter, 0); err == io.EOF {
+		n.updatePool(iter)
+
+		bk, ok := n.q.bestNotInTopK()
+		if !ok {
+			bk = n.a.bestUnseenScore()
+		}
+		if bk <= n.q.kthWorst() {
 			break
-		} else if err != nil {
+		}
+
+		if err := n.nextRound(iter+1, 0); err != nil {
 			return nil, err
 		}
-		for k, v := range pool {
-			attrs := v.Datum.Fields()
-			missing := false
-			for i, v := range attrs {
-				if v == misField[i] {
-					tmpField[i] = currMinField[i]
-					missing = true
-				} else {
-					tmpField[i] = v
-				}
-			}
-			v.best = agg(tmpField)
-
-			var ignore = false
-			if !missing {
-				v.worst = v.best
-				ignore = true
-			} else if v.iter == iter {
-				for i, v := range attrs {
-					if v == misField[i] {
-						tmpField[i] = minField[i]
-					} else {
-						tmpField[i] = v
-					}
-				}
-				v.worst = agg(tmpField)
-				if v.worst == v.best {
-					ignore = true
-				}
-			}
-			if qq.update(v) {
-				ignore = true
-			}
-			if ignore {
-				delete(pool, k)
-				if v.source != n {
-					poolIgnore[k] = v.source
-				}
-			}
-		}
-
-		bk, ok := qq.bestNotInTopK()
-		if !ok {
-			bk = agg(currMinField)
-		}
-		if bk <= qq.kthWorst() {
-			break
-		}
 	}
-	return qq.topK(), nil
+	return n.q.topK(), nil
 }

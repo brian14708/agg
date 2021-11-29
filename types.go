@@ -9,7 +9,7 @@ type Aggregator func([]float64) float64
 
 type Iterator interface {
 	Next(count int) ([]Datum, error)
-	ValueRange() (min, max, missing float64)
+	ValueRange() (min, max, sentinel float64)
 }
 
 type Fetcher interface {

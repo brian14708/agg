@@ -6,11 +6,11 @@ import (
 
 type entry struct {
 	Datum
-	worst  float64
-	best   float64
-	iter   int
-	index  int
-	source int
+	worst          float64
+	best           float64
+	iter           int
+	index          int
+	unseenIterator uint8
 }
 
 type entryQ struct {
