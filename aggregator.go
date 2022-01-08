@@ -16,17 +16,17 @@ type aggregator struct {
 	ret    [][]Datum
 }
 
-func newAggregator(it []Iterator, agg Aggregator) *aggregator {
+func newAggregator(f []FieldInfo, it []Iterator, agg Aggregator) *aggregator {
 	n := len(it)
 	buf := make([]float64, 3*n)
 	currMinField := buf[:n]
 	minField := buf[n : 2*n]
 	tmpField := buf[2*n : 3*n]
 	sentField := make([]uint64, n)
-	for i, v := range it {
-		var s float64
-		minField[i], currMinField[i], s = v.ValueRange()
-		sentField[i] = math.Float64bits(s)
+	for i, f := range f {
+		minField[i] = f.MinValue
+		currMinField[i] = f.MaxValue
+		sentField[i] = math.Float64bits(f.SentinelValue)
 	}
 	return &aggregator{
 		aggFn:         agg,
@@ -34,33 +34,34 @@ func newAggregator(it []Iterator, agg Aggregator) *aggregator {
 		currMinFields: currMinField,
 		minFields:     minField,
 		sentialFields: sentField,
-		buffer:        tmpField,
-		ret:           make([][]Datum, 0, n),
+
+		buffer: tmpField,
+		ret:    make([][]Datum, 0, n),
 	}
 }
 
 func (a *aggregator) fetch(sz int) ([][]Datum, error) {
 	eof := 0
 	results := a.ret[:0]
+
 	for i, c := range a.iterators {
 		if c == nil {
 			eof += 1
 			continue
 		}
+
 		ret, err := c.Next(sz)
 		if err == io.EOF {
+			c.Close()
 			a.iterators[i] = nil
 			a.currMinFields[i] = a.minFields[i]
 			continue
-		}
-		if err != nil {
+		} else if err != nil {
 			return nil, err
 		}
-		results = append(results, ret)
 
-		if len(ret) > 0 {
-			a.currMinFields[i] = ret[len(ret)-1].Fields()[i]
-		}
+		a.currMinFields[i] = ret[len(ret)-1].Fields()[i]
+		results = append(results, ret)
 	}
 	if eof == len(a.iterators) {
 		return nil, io.EOF
@@ -104,4 +105,12 @@ func (a *aggregator) lenIt() uint8 {
 		panic("too many iterators")
 	}
 	return uint8(l)
+}
+
+func (a *aggregator) Close() {
+	for _, i := range a.iterators {
+		if i != nil {
+			i.Close()
+		}
+	}
 }

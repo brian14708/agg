@@ -23,9 +23,11 @@ type iter struct {
 	scanned *int
 }
 
-func (it *iter) ValueRange() (min, max, missing float64) {
+func (it *iter) valueRange() (min, max, missing float64) {
 	return it.val[len(it.val)-1].t[it.idx], it.val[0].t[it.idx], -1
 }
+
+func (it *iter) Close() {}
 
 func (it *iter) Next(count int) ([]Datum, error) {
 	for len(it.buf) < count {
@@ -80,16 +82,26 @@ func newFetcher(src []datum) *fetcher {
 	}
 }
 
-func (f *fetcher) ScanFields() []Iterator {
-	var r []Iterator
+func (f *fetcher) Fields() []FieldInfo {
+	r := make([]FieldInfo, 0, len(f.index))
 	for i, v := range f.index {
-		r = append(r, &iter{
-			val:     v,
-			idx:     i,
-			scanned: &f.fieldsScanned,
+		r = append(r, FieldInfo{
+			MinValue:      v[len(v)-1].t[i],
+			MaxValue:      v[0].t[i],
+			SentinelValue: -1,
+
+			ScanIsSorted: true,
 		})
 	}
 	return r
+}
+
+func (f *fetcher) ScanField(i int) Iterator {
+	return &iter{
+		val:     f.index[i],
+		idx:     i,
+		scanned: &f.fieldsScanned,
+	}
 }
 
 func (f *fetcher) GetDatum(d *Datum) error {

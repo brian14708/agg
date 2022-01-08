@@ -1,6 +1,7 @@
 package agg
 
 import (
+	"fmt"
 	"io"
 	"sort"
 )
@@ -94,9 +95,23 @@ func (n *nra) updatePool(iter int) {
 }
 
 func NRA(fetcher Fetcher, agg Aggregator, k int, opts ...Option) ([]Datum, error) {
+	f := fetcher.Fields()
+	it := make([]Iterator, 0, len(f))
+	for i, f := range f {
+		if !f.ScanIsSorted || f.ScanCost < 0 {
+			for _, i := range it {
+				i.Close()
+			}
+			return nil, fmt.Errorf("NRA algorithm require all fields to support sorted scan")
+		}
+		it = append(it, fetcher.ScanField(i))
+	}
+
+	a := newAggregator(f, it, agg)
+	defer a.Close()
 	n := nra{
 		opt:        makeOptions(opts),
-		a:          newAggregator(fetcher.ScanFields(), agg),
+		a:          a,
 		pool:       make(map[interface{}]*entry),
 		poolIgnore: make(map[interface{}]uint8),
 		q:          newEntryQ(k),
